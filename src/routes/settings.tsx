@@ -54,8 +54,8 @@ function SettingsPage() {
     try {
       const found = await detectComfyUi(pCfg.baseUrl, pCfg.apiKey)
       if (!found) {
-        toast.error('未找到可用的 ComfyUI（已尝试当前地址、127.0.0.1:8000、127.0.0.1:8188），请确认已启动并检查跨域设置', {
-          duration: 10000,
+        toast.error('未找到可用的 ComfyUI（已尝试当前地址、/comfy 代理、127.0.0.1:8000、127.0.0.1:8188）。请确认 ComfyUI 已启动；本地开发用 start.bat 启动网页会自动探测端口，地址填 /comfy 即可，无需 --enable-cors-header。', {
+          duration: 12000,
         })
         return
       }

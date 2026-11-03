@@ -113,6 +113,7 @@ function StudioPage() {
   const [uploadingSlot, setUploadingSlot] = useState<string | null>(null)
   const [showReferenceErrors, setShowReferenceErrors] = useState(false)
   const referenceErrorsRef = useRef<HTMLDivElement | null>(null)
+  const resultRef = useRef<HTMLDivElement | null>(null)
 
   const activeProvider = apiConfig.activeProvider
   const providerMeta = PROVIDER_META[activeProvider]
@@ -162,7 +163,8 @@ function StudioPage() {
         setComfyCheck({
           ok: false,
           errors: [
-            `未找到可用的 ComfyUI 服务（已尝试：${cfg.baseUrl || '默认地址'}、127.0.0.1:8000、127.0.0.1:8188）。请确认 ComfyUI 已启动，并检查跨域 (CORS) 设置。`,
+            `未找到可用的 ComfyUI 服务（已尝试：${cfg.baseUrl || '默认地址'}、/comfy 代理、127.0.0.1:8000、127.0.0.1:8188）。`,
+            '排查顺序：① 确认 ComfyUI 已启动；② 本地开发请用 start.bat 启动网页（会自动探测 8000/8188 并配好代理）；③ 地址填 /comfy 走同源代理，无需给 ComfyUI 加 --enable-cors-header；④ 若直连 8188/8000，浏览器会因 CORS 被拒绝（需该启动参数）。',
           ],
           warnings: [],
           fixes: [],
@@ -373,7 +375,14 @@ function StudioPage() {
       requestAnimationFrame(() => referenceErrorsRef.current?.focus())
       return
     }
-    void startGeneration(prompt)
+    // 手机端「生成结果」在单列布局的最下方，完成后自动滚过去，避免以为没出图
+    void startGeneration(prompt).finally(() => {
+      if (typeof window === 'undefined') return
+      if (!window.matchMedia('(max-width: 1023px)').matches) return
+      requestAnimationFrame(() => {
+        resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      })
+    })
   }
 
   return (
@@ -1408,7 +1417,7 @@ function StudioPage() {
         </div>
 
         {/* 右栏：专注展示 AI 生成结果与生成状态 */}
-        <div className="min-w-0 lg:col-span-5">
+        <div className="min-w-0 lg:col-span-5" ref={resultRef}>
           <Section
             title="生成结果"
             className="@lg/section:grid-cols-1"

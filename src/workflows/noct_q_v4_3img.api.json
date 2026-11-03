@@ -1,0 +1,177 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "portrait_ref.png"
+    },
+    "_meta": {
+      "title": "图1：人像参考 (Portrait)"
+    }
+  },
+  "2": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "costume_ref.png"
+    },
+    "_meta": {
+      "title": "图2：服装参考 (Costume)"
+    }
+  },
+  "3": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "pose_ref.png"
+    },
+    "_meta": {
+      "title": "图3：姿势参考 (Pose)"
+    }
+  },
+  "4": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "NoctalunaNoct-Q-Uncensored-Qwen-Image-2.1_V4_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "_meta": {
+      "title": "加载 Noct Q V4 无审查写实 (int8, 6.8GB) — cfg 调到 3 可启用负面提示词"
+    }
+  },
+  "5": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": [
+        "4",
+        0
+      ],
+      "lora_name": "VNCCS\\VNCCS_QI2_PoseStudioV2.safetensors",
+      "strength_model": 1.0
+    },
+    "_meta": {
+      "title": "VNCCS PoseStudio LoRA（可断开）"
+    }
+  },
+  "6": {
+    "class_type": "QwenImage21Cache",
+    "inputs": {
+      "model": [
+        "5",
+        0
+      ],
+      "device": "auto",
+      "dtype": "default"
+    },
+    "_meta": {
+      "title": "Qwen-Image 2.1 缓存/量化加速"
+    }
+  },
+  "7": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_8b_int8_convrot.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+    },
+    "_meta": {
+      "title": "加载 Qwen3-VL 8B 文本/视觉编码器"
+    }
+  },
+  "8": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+    },
+    "_meta": {
+      "title": "加载 Qwen-Image 2.1 VAE"
+    }
+  },
+  "9": {
+    "class_type": "TextEncodeQwenImage21",
+    "inputs": {
+      "clip": [
+        "7",
+        0
+      ],
+      "images.image_1": [
+        "1",
+        0
+      ],
+      "images.image_2": [
+        "2",
+        0
+      ],
+      "images.image_3": [
+        "3",
+        0
+      ],
+      "vae": [
+        "8",
+        0
+      ],
+      "prompt": "",
+      "negative_prompt": "artifacts, gpt-image, washed-out colors, low quality, low resolution, AI slop, deviantart, sloppy lines, rough sketch, blurry, indistinct, missing fingers, badly drawn hands, wrong number of fingers",
+      "resolution": 1024
+    },
+    "_meta": {
+      "title": "正向/反向提示词 + 画布（三图一次编码）"
+    }
+  },
+  "10": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "6",
+        0
+      ],
+      "positive": [
+        "9",
+        0
+      ],
+      "negative": [
+        "9",
+        1
+      ],
+      "latent_image": [
+        "9",
+        2
+      ],
+      "seed": 12345,
+      "steps": 25,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0
+    },
+    "_meta": {
+      "title": "KSampler (25 步・cfg 1 快速；改 3.0 启用负面词但耗时翻倍)"
+    }
+  },
+  "11": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "10",
+        0
+      ],
+      "vae": [
+        "8",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "VAE 解码"
+    }
+  },
+  "12": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "11",
+        0
+      ],
+      "filename_prefix": "noct_q/result"
+    },
+    "_meta": {
+      "title": "保存生成结果"
+    }
+  }
+}

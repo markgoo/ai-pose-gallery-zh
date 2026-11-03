@@ -1,7 +1,11 @@
 import type { ApiConfig, ExtraReferenceImage, ImageProviderId, RecipeState } from '@/types/gallery'
 import { applyWorkflowOverrides, getWorkflowImages, validateReferenceCombinations, workflowIdentity, type ComfyObjectInfo } from '@/lib/comfyWorkflowParameters'
 import { poseImagePath, referenceImageUrl } from '@/lib/recipeImages'
+import { idbGet, idbSet } from '@/lib/idbStorage'
 import qwen2509ThreeImageWorkflow from '@/workflows/qwen_image_edit_2509_3img.api.json'
+import qwen2511GgufThreeImageWorkflow from '@/workflows/qwen_image_edit_2511_gguf_3img.api.json'
+import qwen21VnccsThreeImageWorkflow from '@/workflows/qwen_image_21_vnccs_3img.api.json'
+import noctQThreeImageWorkflow from '@/workflows/noct_q_v4_3img.api.json'
 
 export interface ProviderModelOption {
   value: string
@@ -462,7 +466,7 @@ function extractUniversalImage(json: any): string | null {
 type ComfyNode = { class_type: string; inputs: Record<string, any>; _meta?: { title?: string; studio?: { imageRole?: string } } }
 type ComfyWorkflow = Record<string, ComfyNode>
 
-export type ComfyPresetId = 'qwen2509_3img' | 'qwen2509_2img' | 'qwen21_3img' | 'qwen21_2img'
+export type ComfyPresetId = 'qwen2509_3img' | 'qwen2509_2img' | 'qwen2511_gguf_3img' | 'qwen21_vnccs_3img' | 'noct_q_v4_3img' | 'qwen21_3img' | 'qwen21_2img'
 
 export interface ComfyNodeMappings {
   promptNodeId: string
@@ -476,10 +480,12 @@ export interface ComfyNodeMappings {
 export const COMFY_DEV_PROXY = '/comfy'
 
 export function isLocalDevHost(): boolean {
-  return (
-    typeof window !== 'undefined' &&
-    ['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname)
-  )
+  if (typeof window === 'undefined') return false
+  const host = window.location.hostname
+  if (['localhost', '127.0.0.1', '[::1]'].includes(host)) return true
+  // 局域网访问（手机/平板打开 http://192.168.x.x:5173）同样由本机 dev server 的 /comfy 同源代理转发，
+  // 此时若退回直连 http://127.0.0.1:8000 会指向手机自己，必然连不上。
+  return /^(?:10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(host)
 }
 
 /** ComfyUI Desktop 默认端口 8000；便携版 / 源码版默认 8188 */
@@ -620,6 +626,21 @@ export const COMFYUI_WORKFLOW_TEMPLATES: Record<
     label: 'Qwen Image Edit 2509 双图姿态迁移（人物+姿势）',
     workflow: buildQwen2509TwoImage(),
     defaults: { promptNodeId: '12', portraitNodeId: '1', costumeNodeId: 'none', poseNodeId: '3', stitchedNodeId: 'none' },
+  },
+  qwen2511_gguf_3img: {
+    label: 'Qwen Image Edit 2511 三图合成（GGUF Q4_K_S 11.6GB，显存 16GB 以下慎用）',
+    workflow: qwen2511GgufThreeImageWorkflow as ComfyWorkflow,
+    defaults: { promptNodeId: '12', portraitNodeId: '1', costumeNodeId: '2', poseNodeId: '3', stitchedNodeId: 'none' },
+  },
+  qwen21_vnccs_3img: {
+    label: 'Qwen-Image 2.1 三图合成（VNCCS PoseStudio・4.3GB 模型，16GB 显存推荐）',
+    workflow: qwen21VnccsThreeImageWorkflow as ComfyWorkflow,
+    defaults: { promptNodeId: '9', portraitNodeId: '1', costumeNodeId: '2', poseNodeId: '3', stitchedNodeId: 'none' },
+  },
+  noct_q_v4_3img: {
+    label: 'Noct Q V4 三图合成（无审查写实・int8 6.8GB・cfg 1 快速版）',
+    workflow: noctQThreeImageWorkflow as ComfyWorkflow,
+    defaults: { promptNodeId: '9', portraitNodeId: '1', costumeNodeId: '2', poseNodeId: '3', stitchedNodeId: 'none' },
   },
   qwen21_3img: {
     label: 'Qwen-Image 2.1 三图合成（需另装 2.1 模型）',
@@ -905,6 +926,7 @@ export async function checkComfyWorkflow(
     const required = def.input?.required || {}
     const optional = def.input?.optional || {}
     const inputs = node.inputs || {}
+    const inputNames = Object.keys(inputs)
 
     for (const [name, spec] of Object.entries<any>(required)) {
       // V3 自动扩展组使用 images.image_1 等扁平输入，组名本身不参与执行。
@@ -920,7 +942,10 @@ export async function checkComfyWorkflow(
         }
         continue
       }
-      if (!(name in inputs)) errors.push(`节点 ${id}「${title}」缺少必填输入 ${name}`)
+      // Autogrow 等多值输入在 API 格式里展开成 parent.child（如 images.image_1），
+      // 只要存在任意一个子输入就视为满足 parent 这一项。
+      const satisfied = name in inputs || inputNames.some((key) => key.startsWith(`${name}.`))
+      if (!satisfied) errors.push(`节点 ${id}「${title}」缺少必填输入 ${name}`)
     }
 
     for (const [name, value] of Object.entries(inputs)) {
@@ -1268,76 +1293,143 @@ async function generateWithComfyUi(params: {
     }
     promptId = promptJson.prompt_id
     report({ stage: 'queue', message: '已提交，等待 ComfyUI 执行…' })
+    // 记下这次未完成的生成：手机锁屏/切 App/页面被系统重载后，回头还能把结果接回来
+    await savePendingComfyRun({
+      promptId,
+      baseUrl,
+      apiKey,
+      startedAt: Date.now(),
+      modelUsed: 'ComfyUI 工作流',
+      prompt,
+    })
 
-    // 5. 轮询 /history/{prompt_id} 获取最终结果
-    const startedAt = Date.now()
-    for (let attempt = 0; ; attempt++) {
-      await sleep(1500)
-      if (Date.now() - startedAt > timeoutSec * 1000) {
-        await cancelComfyPrompt(baseUrl, apiKey, promptId)
-        throw new Error(
-          `[ComfyUI] 等待生成结果超时（超过 ${Math.round(timeoutSec / 60)} 分钟），已取消该任务。首次加载模型较慢，可在合成台调大超时时间后重试。`
-        )
-      }
-      let histRes: Response
-      try {
-        histRes = await comfyFetch(baseUrl, `/history/${promptId}`, {}, apiKey, 15000)
-      } catch (e) {
-        if (attempt % 4 === 3) report({ stage: 'running', message: '暂时无法连接 ComfyUI，正在重试…' })
-        if (Date.now() - startedAt > 60000 && attempt % 20 === 19) throw e
-        continue
-      }
-      if (!histRes.ok) continue
-      const item = (await readJsonSafe(histRes))?.[promptId]
-      if (!item) {
-        if (attempt % 3 === 0) {
-          try {
-            const q = await (await comfyFetch(baseUrl, '/queue', {}, apiKey, 10000)).json()
-            const pendingIdx = (q?.queue_pending || []).findIndex((x: any) => x?.[1] === promptId)
-            if (pendingIdx >= 0) {
-              report({ stage: 'queue', message: `排队中，前方还有 ${pendingIdx + (q.queue_running?.length || 0)} 个任务` })
-            }
-          } catch {
-            /* ignore */
-          }
-        }
-        continue
-      }
-
-      if (item.status?.status_str === 'error') {
-        const { text, oom } = formatExecutionError(item.status?.messages, workflow)
-        if (oom) await freeComfyMemory(baseUrl, apiKey)
-        throw new Error(text)
-      }
-      if (item.status && item.status.completed === false && item.status.status_str !== 'success') continue
-
-      let outImg: { filename: string; subfolder?: string; type?: string } | null = null
-      for (const nodeOut of Object.values<any>(item.outputs || {})) {
-        for (const im of nodeOut?.images || []) {
-          if (!outImg || (im?.type === 'output' && outImg.type !== 'output')) outImg = im
-        }
-      }
-      if (!outImg) {
-        if (item.status?.completed) throw new Error('[ComfyUI] 工作流已执行完成，但没有输出图片（请检查是否有 SaveImage 节点）')
-        continue
-      }
-
-      report({ stage: 'download', message: '正在获取生成结果…', percent: 100 })
-      const qs = new URLSearchParams({
-        filename: outImg.filename,
-        subfolder: outImg.subfolder || '',
-        type: outImg.type || 'output',
-      })
-      const viewRes = await comfyFetch(baseUrl, `/view?${qs.toString()}`, {}, apiKey, 60000)
-      if (!viewRes.ok) throw new Error(`[ComfyUI] 获取生成图片失败 (HTTP ${viewRes.status})`)
-      const blob = await viewRes.blob()
-      if (!blob.size || !blob.type.startsWith('image/')) {
-        throw new Error('[ComfyUI] 返回的生成结果不是有效图片')
-      }
-      return { imageUrl: await blobToDataUrl(blob), modelUsed: 'ComfyUI 工作流', providerUsed: 'comfyui' }
-    }
+    const result = await fetchComfyUiResult(baseUrl, promptId, {
+      apiKey,
+      timeoutSec,
+      onProgress: report,
+      workflow,
+    })
+    return { imageUrl: result.imageUrl, modelUsed: result.modelUsed, providerUsed: 'comfyui' }
   } finally {
+    await clearPendingComfyRun()
     ws?.close()
+  }
+}
+
+// ---------- 未完成生成的持久化：手机端锁屏/切 App/页面被重载后可以接回结果 ----------
+
+const COMFY_PENDING_KEY = 'comfy:pending-run'
+
+export interface PendingComfyRun {
+  promptId: string
+  baseUrl: string
+  apiKey: string
+  startedAt: number
+  modelUsed: string
+  prompt: string
+}
+
+export function savePendingComfyRun(run: PendingComfyRun): Promise<void> {
+  return idbSet(COMFY_PENDING_KEY, run)
+}
+
+export function loadPendingComfyRun(): Promise<PendingComfyRun | undefined> {
+  return idbGet<PendingComfyRun>(COMFY_PENDING_KEY)
+}
+
+export function clearPendingComfyRun(): Promise<void> {
+  return idbSet(COMFY_PENDING_KEY, null)
+}
+
+export interface ComfyResultOptions {
+  apiKey?: string
+  timeoutSec?: number
+  onProgress?: (p: GenerationProgress) => void
+  /** 用于把执行错误映射回可读的节点标题；页面重载后恢复时可为空 */
+  workflow?: ComfyWorkflow
+}
+
+/** 轮询 /history/{prompt_id} 直到完成并取回图片（提交与取回拆开，便于页面重载后恢复） */
+export async function fetchComfyUiResult(
+  baseUrl: string,
+  promptId: string,
+  options: ComfyResultOptions = {}
+): Promise<{ imageUrl: string; modelUsed: string }> {
+  const report = options.onProgress ?? (() => {})
+  const apiKey = options.apiKey ?? ''
+  const timeoutSec = Math.max(60, options.timeoutSec ?? 600)
+  const workflow = options.workflow ?? {}
+  const startedAt = Date.now()
+
+  for (let attempt = 0; ; attempt++) {
+    await sleep(1500)
+    if (Date.now() - startedAt > timeoutSec * 1000) {
+      await cancelComfyPrompt(baseUrl, apiKey, promptId)
+      throw new Error(
+        `[ComfyUI] 等待生成结果超时（超过 ${Math.round(timeoutSec / 60)} 分钟），已取消该任务。首次加载模型较慢，可在合成台调大超时时间后重试。`
+      )
+    }
+    let histRes: Response
+    try {
+      histRes = await comfyFetch(baseUrl, `/history/${promptId}`, {}, apiKey, 15000)
+    } catch (e) {
+      if (attempt % 4 === 3) report({ stage: 'running', message: '暂时无法连接 ComfyUI，正在重试…' })
+      if (Date.now() - startedAt > 60000 && attempt % 20 === 19) throw e
+      continue
+    }
+    if (!histRes.ok) continue
+    const item = (await readJsonSafe(histRes))?.[promptId]
+    if (!item) {
+      let queued: boolean | null = null
+      try {
+        const q = await (await comfyFetch(baseUrl, '/queue', {}, apiKey, 10000)).json()
+        const running = (q?.queue_running || []).some((x: any) => x?.[1] === promptId)
+        const pendingIdx = (q?.queue_pending || []).findIndex((x: any) => x?.[1] === promptId)
+        queued = running || pendingIdx >= 0
+        if (!running && pendingIdx >= 0) {
+          report({ stage: 'queue', message: `排队中，前方还有 ${pendingIdx + (q.queue_running?.length || 0)} 个任务` })
+        }
+      } catch {
+        /* 查询失败就继续等 */
+      }
+      // 既不在队列也不在历史里：ComfyUI 可能重启过，或这条任务已经过期，别傻等到超时
+      if (queued === false && attempt >= 3) {
+        throw new Error('[ComfyUI] 未找到这条生成任务（ComfyUI 可能重启过，或任务已过期），请重新生成')
+      }
+      continue
+    }
+
+    if (item.status?.status_str === 'error') {
+      const { text, oom } = formatExecutionError(item.status?.messages, workflow)
+      if (oom) await freeComfyMemory(baseUrl, apiKey)
+      throw new Error(text)
+    }
+    if (item.status && item.status.completed === false && item.status.status_str !== 'success') continue
+
+    let outImg: { filename: string; subfolder?: string; type?: string } | null = null
+    for (const nodeOut of Object.values<any>(item.outputs || {})) {
+      for (const im of nodeOut?.images || []) {
+        if (!outImg || (im?.type === 'output' && outImg.type !== 'output')) outImg = im
+      }
+    }
+    if (!outImg) {
+      if (item.status?.completed) throw new Error('[ComfyUI] 工作流已执行完成，但没有输出图片（请检查是否有 SaveImage 节点）')
+      continue
+    }
+
+    report({ stage: 'download', message: '正在获取生成结果…', percent: 100 })
+    const qs = new URLSearchParams({
+      filename: outImg.filename,
+      subfolder: outImg.subfolder || '',
+      type: outImg.type || 'output',
+    })
+    const viewRes = await comfyFetch(baseUrl, `/view?${qs.toString()}`, {}, apiKey, 60000)
+    if (!viewRes.ok) throw new Error(`[ComfyUI] 获取生成图片失败 (HTTP ${viewRes.status})`)
+    const blob = await viewRes.blob()
+    if (!blob.size || !blob.type.startsWith('image/')) {
+      throw new Error('[ComfyUI] 返回的生成结果不是有效图片')
+    }
+    return { imageUrl: await blobToDataUrl(blob), modelUsed: 'ComfyUI 工作流' }
   }
 }
 

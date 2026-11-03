@@ -16,10 +16,13 @@ import { parseParameterWorkflow, workflowIdentity } from '@/lib/comfyWorkflowPar
 import { recipeBackup } from '@/lib/recipeImages'
 import {
   buildRecipePrompt,
+  clearPendingComfyRun,
   COMFYUI_WORKFLOW_TEMPLATES,
   DEFAULT_COMFY_PRESET,
+  fetchComfyUiResult,
   generateCharacterImage,
   type GenerationProgress,
+  loadPendingComfyRun,
   PROVIDER_META,
   stitchRecipeCanvas,
 } from '@/services/aiGenerator'
@@ -45,7 +48,7 @@ const RECIPE_KEY = 'pose_atlas_recipe_v3'
 const HISTORY_KEY = 'pose_atlas_history_v3'
 const SAFE_MODE_KEY = 'pose_atlas_safe_mode_v1'
 
-const COMFY_CONFIG_VERSION = 3
+const COMFY_CONFIG_VERSION = 4
 
 const shouldEnableProxyByDefault = (provider?: ImageProviderId) =>
   provider === 'qwen' || provider === 'doubao'
@@ -139,6 +142,14 @@ function migrateComfy(
       workflowPreset: DEFAULT_COMFY_PRESET,
       workflowJson: JSON.stringify(COMFYUI_WORKFLOW_TEMPLATES[DEFAULT_COMFY_PRESET].workflow, null, 2),
       ...COMFYUI_WORKFLOW_TEMPLATES[DEFAULT_COMFY_PRESET].defaults,
+    })
+  }
+  // v2 → v3：2511 GGUF 预设改为省显存默认（文本编码走 CPU、输出 0.5MP），
+  // 已在使用该预设的用户同步刷新，避免沿用旧的高显存参数再次卡住。
+  if (params.workflowPreset === 'qwen2511_gguf_3img') {
+    Object.assign(nextParams, {
+      workflowJson: JSON.stringify(COMFYUI_WORKFLOW_TEMPLATES.qwen2511_gguf_3img.workflow, null, 2),
+      ...COMFYUI_WORKFLOW_TEMPLATES.qwen2511_gguf_3img.defaults,
     })
   }
   const nextProvider = { ...provider }
@@ -566,6 +577,54 @@ export function StudioProvider({ children }: { children: ReactNode }) {
     setHistory((prev) => prev.filter((x) => x.id !== id))
     toast.success('已删除该条记录')
   }
+
+  // 手机锁屏 / 切到别的 App 时，浏览器常把页面冻结甚至丢弃重载，导致 ComfyUI 已经出图、
+  // 页面却拿不到结果。这里在初始化时把上次未完成的生成接回来（ComfyUI 侧本来就在跑）。
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      const pending = await loadPendingComfyRun()
+      if (!pending || cancelled) return
+      if (Date.now() - pending.startedAt > 60 * 60 * 1000) {
+        await clearPendingComfyRun()
+        return
+      }
+      if (isGeneratingRef.current) return
+      isGeneratingRef.current = true
+      setIsGenerating(true)
+      setGeneratingModel(pending.modelUsed || 'ComfyUI 工作流')
+      setGenerationProgress(null)
+      setGenerationError('')
+      toast.message('检测到上次未完成的生成，正在恢复…')
+      try {
+        const { imageUrl, modelUsed } = await fetchComfyUiResult(pending.baseUrl, pending.promptId, {
+          apiKey: pending.apiKey,
+          timeoutSec: 600,
+          onProgress: setGenerationProgress,
+        })
+        if (cancelled) return
+        setPreviewUrl(imageUrl)
+        addHistory({
+          provider: 'comfyui',
+          model: modelUsed || pending.modelUsed || 'ComfyUI 工作流',
+          prompt: pending.prompt,
+          imageUrl,
+          recipeSummary: '恢复的生成（ComfyUI）',
+        })
+        toast.success('上次的生成结果已恢复')
+      } catch (e) {
+        if (!cancelled) setGenerationError(e instanceof Error ? e.message : '恢复生成结果失败')
+      } finally {
+        await clearPendingComfyRun()
+        isGeneratingRef.current = false
+        setIsGenerating(false)
+        setGenerationProgress(null)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const clearHistory = () => {
     setHistory([])
