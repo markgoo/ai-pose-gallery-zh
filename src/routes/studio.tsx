@@ -1,3 +1,4 @@
+import { ImageViewer } from '@/components/common/ImageViewer'
 import { useQueryClient } from '@tanstack/react-query'
 import { createFileRoute, Link } from '@tanstack/react-router'
 import {
@@ -34,7 +35,7 @@ import { applyWorkflowOverrides, validateReferenceCombinations, workflowIdentity
 import { PageHeader } from '@/components/common/PageHeader'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
@@ -75,13 +76,13 @@ const PROVIDER_LIST: ImageProviderId[] = ['gemini', 'gpt', 'qwen', 'doubao', 'co
 
 function StudioPage() {
   const {
+    hydrated, activeTask, resumeGeneration, stopTracking,
     recipe,
     apiConfig,
     history,
     customPrompt,
     setCustomPrompt,
     previewUrl,
-    setPreviewUrl,
     isGenerating,
     generatingModel,
     generationProgress,
@@ -1365,6 +1366,13 @@ function StudioPage() {
             )}
           </Section>
 
+          {activeTask && <Section title="未决任务" className="@lg/section:grid-cols-1">
+            <p className="break-all text-xs">{activeTask.task ? `任务 ${activeTask.task.promptId}：刷新后查询原任务，不重复提交。` : '提交结果未知或提交前被中断，请核对后端队列；不会自动重试提交。'}</p>
+            <div className="flex flex-wrap gap-2">
+              <Button disabled={isGenerating || !activeTask.task} onClick={() => void resumeGeneration()}>恢复追踪</Button>
+              <Button variant="outline" onClick={() => void stopTracking()}>停止跟踪（不取消后端）</Button>
+            </div>
+          </Section>}
           {/* 3. 提示词与生成按钮 */}
           <Section
             title="3. 提示词 (Prompt)"
@@ -1398,7 +1406,7 @@ function StudioPage() {
 
             <Button
               onClick={handleGenerate}
-              disabled={isGenerating || uploadingSlot !== null}
+              disabled={!hydrated || !!activeTask || isGenerating || uploadingSlot !== null}
               className="h-11 w-full text-sm font-semibold"
             >
               {isGenerating ? (
@@ -1448,6 +1456,7 @@ function StudioPage() {
                     {generationProgress && (
                       <div className="w-56 max-w-full space-y-1.5 pt-1">
                         <div className="text-xs text-foreground/80">{generationProgress.message}</div>
+                        {generationProgress.connection && <p className="text-xs text-muted-foreground">连接：{{connecting: 'WebSocket 连接中', connected: 'WebSocket 已连接', reconnecting: 'WebSocket 重连中，HTTP 保底跟踪', degraded: 'WebSocket 暂不可用，HTTP 保底跟踪'}[generationProgress.connection]}</p>}
                         {generationProgress.percent !== undefined && (
                           <div className="h-1.5 overflow-hidden rounded-full bg-muted">
                             <div
@@ -1477,13 +1486,7 @@ function StudioPage() {
                   )}
                 </div>
               ) : previewUrl ? (
-                <img
-                  src={previewUrl}
-                  alt="生成结果"
-                  onClick={() => setZoomImageUrl(previewUrl)}
-                  title="点击放大查看"
-                  className="max-h-[480px] w-auto cursor-zoom-in rounded-xl object-contain transition hover:opacity-95"
-                />
+                <button type="button" aria-label="放大生成结果" onClick={() => setZoomImageUrl(previewUrl)} className="cursor-zoom-in rounded-xl focus-visible:outline-2 focus-visible:outline-ring"><img src={previewUrl} alt="生成结果" className="max-h-[480px] w-auto rounded-xl object-contain transition hover:opacity-95" /></button>
               ) : (
                 <div className="flex flex-col items-center gap-2 text-center text-muted-foreground">
                   <SparklesIcon className="size-7 opacity-35" />
@@ -1512,13 +1515,8 @@ function StudioPage() {
               key={h.id}
               className="group flex flex-col justify-between overflow-hidden rounded-2xl bg-background p-2"
             >
-              <div
-                onClick={() => {
-                  setPreviewUrl(h.imageUrl)
-                  setZoomImageUrl(h.imageUrl)
-                }}
-                className="relative aspect-3/4 cursor-zoom-in overflow-hidden rounded-xl bg-muted"
-              >
+              <div className="relative aspect-3/4 overflow-hidden rounded-xl bg-muted">
+                <button type="button" aria-label={`查看生成记录：${h.recipeSummary}`} onClick={() => setZoomImageUrl(h.imageUrl)} className="block h-full w-full cursor-zoom-in focus-visible:outline-2 focus-visible:outline-ring">
                 <img
                   src={h.imageUrl}
                   alt={h.recipeSummary}
@@ -1527,6 +1525,7 @@ function StudioPage() {
                 <span className="absolute bottom-1.5 left-1.5 max-w-[calc(100%-12px)] truncate rounded-md bg-black/70 px-1.5 py-0.5 font-mono text-[10px] text-white">
                   {h.model}
                 </span>
+                </button>
                 <button
                   type="button"
                   onClick={(e) => {
@@ -1568,30 +1567,7 @@ function StudioPage() {
       )}
 
       {/* 生成结果全屏放大灯箱 */}
-      <Dialog open={Boolean(zoomImageUrl)} onOpenChange={(o) => !o && setZoomImageUrl(null)}>
-        <DialogContent className="max-h-[92dvh] w-[95vw] max-w-4xl overflow-y-auto p-4 sm:max-w-4xl">
-          <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-3 pr-8">
-            <div><DialogTitle className="text-base">图片大图预览</DialogTitle><DialogDescription className="sr-only">参考图片或生成结果的放大预览。按 Esc 或关闭按钮返回。</DialogDescription></div>
-            {zoomImageUrl && (
-              <Button size="sm" variant="outline" asChild>
-                <a href={zoomImageUrl} download="image.png">
-                  <DownloadIcon className="size-3.5" />
-                  下载原图
-                </a>
-              </Button>
-            )}
-          </DialogHeader>
-          {zoomImageUrl && (
-            <div className="mt-2 flex items-center justify-center overflow-hidden rounded-xl bg-muted/60 p-2">
-              <img
-                src={zoomImageUrl}
-                alt="大图预览"
-                className="max-h-[78dvh] w-auto rounded-lg object-contain"
-              />
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
+      <ImageViewer imageUrl={zoomImageUrl || ''} open={Boolean(zoomImageUrl)} onOpenChange={(open) => !open && setZoomImageUrl(null)} />
 
       {/* 参考拼图独立弹窗（不占用主画布） */}
       <Dialog open={Boolean(stitchModalUrl)} onOpenChange={(o) => !o && setStitchModalUrl(null)}>
